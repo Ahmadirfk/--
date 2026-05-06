@@ -1,52 +1,139 @@
-name: دانلود دستی ویدئوی یوتیوب
+name: 🎯 YouTube Downloader (ytmp3.gg API)
 
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'لینک ویدئوی یوتیوب'
+        description: '🎬 YouTube Video URL'
         required: true
         type: string
-      format:
-        description: 'فرمت ویدئو'
+      type:
+        description: '📦 Output Type'
         required: true
         type: choice
         options:
-        - mp4
-        - webm
+          - video
+          - audio
+        default: 'video'
       quality:
-        description: 'کیفیت ویدئو'
-        required: true
-        type: choice
-        options:
-        - 2160p
-        - 1080p
-        - 720p
+        description: '🎚️ Quality (e.g., 720p/1080p for video, 192kbps for audio)'
+        required: false
+        type: string
+        default: '720p'
+      split_mb:
+        description: '✂️ Split files larger than (MB), 0 = never split'
+        required: false
+        type: number
+        default: 0
 
 jobs:
   download:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # فعال‌سازی Node.js 24 برای رفع هشدار
     steps:
-      - name: دریافت کد مخزن
-        uses: actions/checkout@v4
+      - name: 🔧 Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y curl jq
 
-      - name: نصب yt-dlp
-        uses: AnimMouse/setup-yt-dlp@v3
-
-      - name: نصب FFmpeg
+      - name: 🎯 Convert & Download via ytmp3.gg
+        id: download
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          URL="${{ github.event.inputs.url }}"
+          TYPE="${{ github.event.inputs.type }}"
+          QUALITY="${{ github.event.inputs.quality }}"
+          SPLIT_MB="${{ github.event.inputs.split_mb }}"
+          API="https://hub.ytconvert.org/api/download"
+          HEADERS=(
+            -H "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0"
+            -H "Accept: application/json"
+            -H "Referer: https://media.ytmp3.gg/"
+            -H "Content-Type: application/json"
+            -H "Origin: https://media.ytmp3.gg/"
+          )
 
-      - name: دانلود ویدئو
+          # تنظیم payload
+          if [ "$TYPE" = "audio" ]; then
+            BITRATE=$(echo "$QUALITY" | grep -oP '\d+')
+            [ -z "$BITRATE" ] && BITRATE=192
+            PAYLOAD=$(jq -n --arg url "$URL" --arg bitrate "${BITRATE}kbps" '{
+              url: $url,
+              os: "linux",
+              output: { type: "audio", format: "mp3" },
+              audio: { bitrate: $bitrate }
+            }')
+            EXT="mp3"
+          else
+            HEIGHT=$(echo "$QUALITY" | grep -oP '\d+')
+            [ -z "$HEIGHT" ] && HEIGHT=720
+            PAYLOAD=$(jq -n --arg url "$URL" --arg quality "${HEIGHT}p" '{
+              url: $url,
+              os: "linux",
+              output: { type: "video", format: "mp4", quality: $quality }
+            }')
+            EXT="mp4"
+          fi
+
+          echo "📤 Requesting conversion..."
+          RESP=$(curl -sS "${HEADERS[@]}" -d "$PAYLOAD" "$API")
+          STATUS_URL=$(echo "$RESP" | jq -r '.statusUrl')
+          TITLE=$(echo "$RESP" | jq -r '.title // "video"')
+
+          if [ -z "$STATUS_URL" ] || [ "$STATUS_URL" = "null" ]; then
+            echo "❌ Failed to start conversion"
+            echo "$RESP" | jq .
+            exit 1
+          fi
+
+          echo "✅ Job started: $TITLE"
+          echo "⏳ Waiting for completion..."
+
+          for i in $(seq 1 60); do
+            sleep 3
+            STATUS=$(curl -sS "${HEADERS[@]}" "$STATUS_URL")
+            PROGRESS=$(echo "$STATUS" | jq -r '.progress // 0')
+            STATE=$(echo "$STATUS" | jq -r '.status')
+            echo "   [$i] $STATE ($PROGRESS%)"
+
+            if [ "$STATE" = "completed" ]; then
+              DOWNLOAD_URL=$(echo "$STATUS" | jq -r '.downloadUrl')
+              break
+            elif [ "$STATE" = "failed" ]; then
+              echo "❌ Conversion failed"
+              echo "$STATUS" | jq .
+              exit 1
+            fi
+          done
+
+          [ -z "$DOWNLOAD_URL" ] && echo "⏰ Timeout" && exit 1
+
+          # نام فایل امن
+          SAFE_TITLE=$(echo "$TITLE" | sed 's/[^a-zA-Z0-9_-]/_/g' | cut -c1-80)
+          FILENAME="${SAFE_TITLE}.${EXT}"
+
+          echo "📥 Downloading $FILENAME..."
+          curl -L "${HEADERS[@]}" -o "$FILENAME" "$DOWNLOAD_URL"
+          [ ! -s "$FILENAME" ] && echo "❌ Download empty" && exit 1
+
+          SIZE=$(stat -c%s "$FILENAME")
+          echo "✅ Downloaded: $FILENAME ($((SIZE/1024/1024)) MB)"
+          echo "FILENAME=$FILENAME" >> $GITHUB_OUTPUT
+
+      - name: ✂️ Split if needed
         run: |
-          FORMAT_STRING="bestvideo[height<=${{ github.event.inputs.quality }}][ext=${{ github.event.inputs.format }}]+bestaudio[ext=m4a]/best[height<=${{ github.event.inputs.quality }}]"
-          yt-dlp -f "$FORMAT_STRING" -o "downloaded_video.%(ext)s" "${{ github.event.inputs.url }}"
+          FILE="${{ steps.download.outputs.FILENAME }}"
+          THRESHOLD_MB="${{ github.event.inputs.split_mb }}"
+          THRESHOLD_BYTES=$((THRESHOLD_MB * 1024 * 1024))
 
-      - name: بارگذاری خروجی
+          if [ "$THRESHOLD_MB" -gt 0 ] && [ $(stat -c%s "$FILE") -gt $THRESHOLD_BYTES ]; then
+            echo "✂️ Splitting $FILE into ${THRESHOLD_MB}MB chunks..."
+            mkdir -p parts
+            split -b $THRESHOLD_BYTES -d "$FILE" parts/
+            rm "$FILE"
+            echo "UPLOAD_PATH=parts" >> $GITHUB_OUTPUT
+          else
+            echo "UPLOAD_PATH=$FILE" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 📤 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: downloaded-video
-          path: downloaded_video.${{ github.event.inputs.format }}
+          name: youtube-download
+          path: ${{ steps.download.outputs.UPLOAD_PATH != '' && steps.download.outputs.UPLOAD_PATH || steps.download.outputs.FILENAME }}
