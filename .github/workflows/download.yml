@@ -26,6 +26,8 @@ on:
 jobs:
   download:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # فعال‌سازی Node.js 24 برای رفع هشدار
     steps:
       - name: دریافت کد مخزن
         uses: actions/checkout@v4
@@ -33,20 +35,17 @@ jobs:
       - name: نصب yt-dlp
         uses: AnimMouse/setup-yt-dlp@v3
 
-      - name: نصب FFmpeg (برای ادغام ویدئو و صدا)
+      - name: نصب FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
       - name: دانلود ویدئو
         run: |
-          # ساخت رشته فرمت بر اساس انتخاب‌های کاربر
           FORMAT_STRING="bestvideo[height<=${{ github.event.inputs.quality }}][ext=${{ github.event.inputs.format }}]+bestaudio[ext=m4a]/best[height<=${{ github.event.inputs.quality }}]"
-          
-          # اجرای دستور دانلود، خروجی با نام 'downloaded_video.فرمت' ذخیره می‌شود
           yt-dlp -f "$FORMAT_STRING" -o "downloaded_video.%(ext)s" "${{ github.event.inputs.url }}"
 
-      - name: بارگذاری خروجی (Artifact)
+      - name: بارگذاری خروجی
         uses: actions/upload-artifact@v4
         with:
           name: downloaded-video
